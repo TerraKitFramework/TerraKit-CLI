@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "Noisy terrain",
+  "region": {"seed": 12345, "x": 0, "y": 0, "lod": 0, "width": 64, "height": 64, "spacing_x": 2, "spacing_y": 2},
+  "nodes": [
+    {"id": "base", "type": "terrakit.height.flat", "parameters": {"elevation": "10"}},
+    {"id": "noise", "type": "terrakit.height.noise", "parameters": {"frequency": "0.025", "amplitude": "8", "octaves": "4"}},
+    {"id": "geometry", "type": "terrakit.mesh.height_field", "parameters": {"generate_normals": "true", "generate_texcoords": "true"}}
+  ],
+  "links": [
+    {"from_node": "base", "from_port": "height", "to_node": "noise", "to_port": "source"},
+    {"from_node": "noise", "from_port": "height", "to_node": "geometry", "to_port": "height"}
+  ],
+  "output": {"node": "geometry", "port": "mesh"}
+}

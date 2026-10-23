@@ -1,0 +1,70 @@
+name: CI
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\msys64\ucrt64\bin'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Go formatting
+        shell: bash
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Vet
+        run: go vet ./...
+        env:
+          CGO_ENABLED: '1'
+      - name: Unit tests
+        run: go test -count=1 ./...
+        env:
+          CGO_ENABLED: '1'
+      - name: Build executable
+        run: go build ./cmd/terrakit
+        env:
+          CGO_ENABLED: '1'
+
+  native-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Downloader tests (offline fixtures)
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Download pinned precompiled TerraKit shared library
+        run: python scripts/fetch_native.py --target x86_64-unknown-linux-gnu
+      - name: Native C ABI integration test
+        run: go test -count=1 ./internal/native -v
+        env:
+          TERRAKIT_LIBRARY: ${{ github.workspace }}/dist/bin/libterrakit.so
+      - name: End-to-end native OBJ generation
+        run: |
+          go run ./cmd/terrakit validate --config examples/noisy-terrain.json
+          go run ./cmd/terrakit run --config examples/noisy-terrain.json --out "$RUNNER_TEMP/terrain.obj"
+          test -s "$RUNNER_TEMP/terrain.obj"
+          grep -q '^f ' "$RUNNER_TEMP/terrain.obj"
+        env:
+          TERRAKIT_LIBRARY: ${{ github.workspace }}/dist/bin/libterrakit.so

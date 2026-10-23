@@ -1,0 +1,158 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The downloaded TerraKit release is pinned by native-version.txt.
+# Go builds use CGO for the loader, but Rust/Cargo is NOT needed.
+env:
+  CGO_ENABLED: '1'
+
+jobs:
+  package:
+    name: Package ${{ matrix.slug }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            slug: windows-amd64
+            target: x86_64-pc-windows-msvc
+            executable: terrakit.exe
+            native: terrakit.dll
+          - runner: ubuntu-latest
+            slug: linux-amd64
+            target: x86_64-unknown-linux-gnu
+            executable: terrakit
+            native: libterrakit.so
+          - runner: macos-15-intel
+            slug: macos-amd64
+            target: x86_64-apple-darwin
+            executable: terrakit
+            native: libterrakit.dylib
+          - runner: macos-15
+            slug: macos-arm64
+            target: aarch64-apple-darwin
+            executable: terrakit
+            native: libterrakit.dylib
+
+    steps:
+      - name: Check out CLI
+        uses: actions/checkout@v4
+
+      - name: Install Windows C compiler for Go CGO
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Add MinGW compiler to PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\msys64\ucrt64\bin'
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install Python for verified download
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Test binary downloader
+        shell: bash
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
+
+      - name: Download pinned precompiled TerraKit library (and SHA-256)
+        shell: bash
+        run: python scripts/fetch_native.py --target '${{ matrix.target }}' --output-dir dist/bin
+
+      - name: Verify downloaded native artifact exists
+        shell: pwsh
+        run: |
+          $native = 'dist/bin/${{ matrix.native }}'
+          if (!(Test-Path -LiteralPath $native -PathType Leaf)) { throw "Native library not found: $native" }
+
+      - name: Run Go tests against the real native library
+        shell: bash
+        env:
+          TERRAKIT_LIBRARY: ${{ github.workspace }}/dist/bin/${{ matrix.native }}
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Build CLI executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -ldflags='-s -w' -o 'dist/bin/${{ matrix.executable }}' ./cmd/terrakit
+
+      - name: Assemble, smoke-test and zip distributable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = 'dist/package'
+          $releases = 'dist/releases'
+          New-Item -ItemType Directory -Force -Path $folder, $releases | Out-Null
+          Copy-Item 'dist/bin/${{ matrix.executable }}' $folder
+          Copy-Item 'dist/bin/${{ matrix.native }}' $folder
+          Copy-Item README.md $folder
+          Copy-Item native-version.txt $folder
+          New-Item -ItemType Directory -Force -Path "$folder/examples" | Out-Null
+          Copy-Item examples/noisy-terrain.json "$folder/examples"
+
+          # Prove the shipped executable can find the pinned library next to it.
+          Remove-Item Env:TERRAKIT_LIBRARY -ErrorAction SilentlyContinue
+          $exe = (Resolve-Path "$folder/${{ matrix.executable }}").Path
+          & $exe stages | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled native stage discovery failed' }
+          $obj = Join-Path $env:RUNNER_TEMP 'smoke.obj'
+          & $exe run --config 'examples/noisy-terrain.json' --out $obj
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled native OBJ generation failed' }
+          if (!(Test-Path $obj) -or (Get-Item $obj).Length -eq 0) { throw 'OBJ output is empty' }
+
+          $archive = "$releases/terrakit-cli_${{ github.ref_name }}_${{ matrix.slug }}.zip"
+          Compress-Archive -Path "$folder/*" -DestinationPath $archive -CompressionLevel Optimal
+          $digest = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLowerInvariant()
+          "$digest  $(Split-Path $archive -Leaf)" | Set-Content -Encoding ascii "$archive.sha256"
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.slug }}
+          path: dist/releases/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Collect all platform bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish versioned assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

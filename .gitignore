@@ -1,0 +1,16 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+coverage.txt
+# Generated artifacts
+*.obj
+*.mtl
+*.tmp
+.DS_Store
+.idea/
+.vscode/
+/dist/
+__pycache__/
+*.pyc
