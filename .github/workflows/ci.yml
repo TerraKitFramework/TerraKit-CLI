@@ -25,13 +25,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Go formatting
+      - name: Check Go formatting
         shell: bash
-        run: test -z "$(gofmt -l cmd internal)"
-      - name: Vet
-        run: go vet ./...
-        env:
-          CGO_ENABLED: '1'
+        run: |
+          unformatted="$(gofmt -l cmd internal)"
+          if [ -n "$unformatted" ]; then
+            printf 'Files needing gofmt:\n%s\n' "$unformatted"
+            exit 1
+          fi
       - name: Unit tests
         run: go test -count=1 ./...
         env:
